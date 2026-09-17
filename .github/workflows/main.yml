@@ -1,0 +1,109 @@
+# .github/workflows/build.yml
+#
+# Compila SilenceFlow (VST3 en Windows/macOS, AU en macOS, y Standalone en
+# ambos) usando CMake + JUCE, y deja los binarios listos para descargar como
+# "artifacts" de cada ejecución.
+#
+# Se dispara en:
+#   - cada push a main
+#   - cada pull request
+#   - manualmente, desde la pestaña "Actions" de GitHub ("Run workflow")
+
+name: Build SilenceFlow
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Versión de JUCE fijada (release estable), para builds reproducibles.
+  # Súbela cuando quieras actualizar de versión.
+  JUCE_TAG: "8.0.14"
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows (VST3 + Standalone)
+          - os: macos-latest
+            name: macOS (VST3 + AU + Standalone)
+
+    steps:
+      # 1) Trae el código del plugin (este repositorio).
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      # 2) Trae JUCE en una carpeta hermana "JUCE" (referenciada por
+      #    add_subdirectory(JUCE) en el CMakeLists.txt del proyecto).
+      - name: Checkout de JUCE ${{ env.JUCE_TAG }}
+        uses: actions/checkout@v4
+        with:
+          repository: juce-framework/JUCE
+          ref: ${{ env.JUCE_TAG }}
+          path: JUCE
+
+      # 3) Dependencias de sistema necesarias para compilar plugins de audio
+      #    en Linux/macOS con la GUI de JUCE (ALSA, X11, FreeType, etc. en
+      #    Linux; en macOS y Windows no hace falta nada extra normalmente).
+      - name: Instalar dependencias (Linux, si se añade al matrix)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libx11-dev \
+            libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev \
+            libxrandr-dev libxrender-dev libwebkit2gtk-4.1-dev libglu1-mesa-dev
+
+      - name: Instalar Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      # 4) Configura el proyecto con CMake.
+      #    - Windows: generador de Visual Studio (usa MSVC directamente, sin
+      #      pasos adicionales de entorno).
+      #    - macOS: Ninja + build universal (Intel + Apple Silicon) para que
+      #      el plugin funcione en cualquier Mac.
+      # SILENCEFLOW_COPY_PLUGIN=OFF: en CI no queremos (ni podemos, sin más
+      # permisos) que el build intente instalar el plugin en las carpetas de
+      # plugins del sistema. Los binarios se recogen luego como artifact.
+      - name: Configurar (Windows)
+        if: runner.os == 'Windows'
+        run: >
+          cmake -B build -G "Visual Studio 17 2022" -A x64
+          -DSILENCEFLOW_COPY_PLUGIN=OFF
+
+      - name: Configurar (macOS)
+        if: runner.os == 'macOS'
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+          -DSILENCEFLOW_COPY_PLUGIN=OFF
+
+      # 5) Compila en modo Release.
+      - name: Compilar
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
+
+      # 6) Muestra en el log qué se generó, útil para depurar si algo falla.
+      - name: Listar artefactos generados
+        shell: bash
+        run: find build -type d -iname "*_artefacts*" -exec find {} -maxdepth 2 \;
+
+      # 7) Sube los binarios (VST3/AU/Standalone) como artifact descargable
+      #    desde la página de esta ejecución en GitHub Actions.
+      - name: Subir artefactos
+        uses: actions/upload-artifact@v4
+        with:
+          name: SilenceFlow-${{ runner.os }}
+          path: |
+            build/SilenceFlow_artefacts/${{ env.BUILD_TYPE }}/**
+          if-no-files-found: error
+          retention-days: 30
